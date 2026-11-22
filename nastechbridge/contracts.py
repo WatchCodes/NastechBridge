@@ -1,8 +1,11 @@
 """Load contracts from CodeFoundry schemas (single source of truth)."""
 from __future__ import annotations
-import json, os
+
+import json
+import os
 from pathlib import Path
 from typing import Any
+
 from jsonschema import Draft202012Validator
 
 SCHEMA_NAMES = {
@@ -15,6 +18,15 @@ SCHEMA_NAMES = {
     "common": "common.definitions.json",
 }
 
+
+class UnknownSchemaError(ValueError):
+    """Raised when a schema name is not in the known contract set."""
+
+
+def known_schemas() -> list[str]:
+    return sorted(SCHEMA_NAMES)
+
+
 def _schemas_dir() -> Path:
     env = os.environ.get("WATCHCODES_SCHEMAS_DIR")
     if env:
@@ -25,11 +37,24 @@ def _schemas_dir() -> Path:
         return candidate
     return here.parent / "schemas"
 
+
+def _resolve_name(name: str) -> str:
+    if name in SCHEMA_NAMES:
+        return name
+    raise UnknownSchemaError(
+        f"unknown schema: {name!r}; known schemas: {', '.join(known_schemas())}"
+    )
+
+
 def load_schema(name: str) -> dict[str, Any]:
-    return json.loads((_schemas_dir() / SCHEMA_NAMES[name]).read_text(encoding="utf-8"))
+    key = _resolve_name(name)
+    path = _schemas_dir() / SCHEMA_NAMES[key]
+    return json.loads(path.read_text(encoding="utf-8"))
+
 
 def _registry():
     from referencing import Registry, Resource
+
     registry = Registry()
     for fn in SCHEMA_NAMES.values():
         schema = json.loads((_schemas_dir() / fn).read_text(encoding="utf-8"))
@@ -39,14 +64,20 @@ def _registry():
         registry = registry.with_resource(fn, resource)
     return registry
 
-def validate(name: str, document: Any) -> None:
-    Draft202012Validator(load_schema(name), registry=_registry()).validate(document)
 
-def is_valid(name: str, document: Any):
-    v = Draft202012Validator(load_schema(name), registry=_registry())
+def validate(name: str, document: Any) -> None:
+    key = _resolve_name(name)
+    Draft202012Validator(load_schema(key), registry=_registry()).validate(document)
+
+
+def is_valid(name: str, document: Any) -> tuple[bool, list[str]]:
+    key = _resolve_name(name)
+    v = Draft202012Validator(load_schema(key), registry=_registry())
     errs = sorted(v.iter_errors(document), key=lambda e: list(e.path))
     msgs = []
     for e in errs:
-        loc = "$" + "".join(f"[{p!r}]" if isinstance(p, int) else f".{p}" for p in e.path)
+        loc = "$" + "".join(
+            f"[{p!r}]" if isinstance(p, int) else f".{p}" for p in e.path
+        )
         msgs.append(f"{loc}: {e.message}")
     return (len(errs) == 0, msgs)
