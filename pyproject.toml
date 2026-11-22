@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "watchcodes-nastechbridge"
+version = "0.1.0"
+description = "NastechBridge: durable report waitlist and batch readiness gate."
+requires-python = ">=3.11"
+dependencies = ["jsonschema>=4.21,<5"]
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<9", "ruff>=0.9,<1"]
+[tool.setuptools]
+packages = ["nastechbridge"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
