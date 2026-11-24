@@ -197,3 +197,28 @@ def test_cli_consolidate_rejects_bad_expected(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert rc == 2
     assert out["ok"] is False
+
+
+def test_migration_report_accepts_every_codefoundry_checkpoint_stage():
+    stages = (
+        "start", "validate", "receipt", "scan", "license", "clone",
+        "brand", "credits", "gate", "ship", "report",
+    )
+    report = _migration_report(status="REQUIRES_REVIEW")
+    report["checks"]["created"] = False
+    report["error"] = "checks not satisfied: created"
+    report["receipt"]["checkpoints"] = [
+        {"stage": s, "at": "2026-11-24T00:00:00Z", "ok": True} for s in stages
+    ]
+    ok, errors = contracts.is_valid("migration-report", report)
+    assert ok, errors
+
+
+def test_migration_report_still_rejects_unknown_checkpoint_stage():
+    report = _migration_report()
+    report["receipt"]["checkpoints"] = [
+        {"stage": "not_a_real_stage", "at": "2026-11-24T00:00:00Z", "ok": True}
+    ]
+    ok, errors = contracts.is_valid("migration-report", report)
+    assert ok is False
+    assert any("not_a_real_stage" in e for e in errors)
