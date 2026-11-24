@@ -1,9 +1,13 @@
 """Durable report waitlist and batch readiness consolidation."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,11 +68,19 @@ def _safe_file_component(repo_ref: str) -> str:
 
 
 def _atomic_write_json(path: Path, document: dict[str, Any]) -> None:
+    """Replace ``path`` with a complete document using a private temp file.
+
+    Temp names must be unique per call, not per process: several threads can
+    ingest into one batch concurrently, and a shared PID-scoped name lets one
+    writer replace or unlink another writer's temp file.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
     data = json.dumps(document, indent=2, sort_keys=True) + "\n"
     try:
-        tmp.write_text(data, encoding="utf-8")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
         os.replace(tmp, path)
     finally:
         try:
@@ -139,6 +151,29 @@ class Bridge:
     def _manifest_path(self, batch_id: str) -> Path:
         return self.batch_dir(batch_id) / "manifest.json"
 
+    def _manifest_lock_path(self, batch_id: str) -> Path:
+        return self.batch_dir(batch_id) / "manifest.json.lock"
+
+    @contextmanager
+    def _manifest_lock(self, batch_id: str) -> Iterator[None]:
+        """Serialize the manifest read-modify-write cycle for one batch.
+
+        ``consolidate`` turns manifest entries into a publication readiness
+        verdict. Without an exclusive lock, two ingests can each read the same
+        snapshot and the last writer can erase a newer entry, making the gate
+        fail open. The lock file is an implementation detail, never report
+        evidence, so it is excluded from version control.
+        """
+        batch_id = _validate_batch_id(batch_id)
+        lock_path = self._manifest_lock_path(batch_id)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
     def load_manifest(self, batch_id: str) -> dict[str, Any]:
         batch_id = _validate_batch_id(batch_id)
         p = self._manifest_path(batch_id)
@@ -161,6 +196,12 @@ class Bridge:
         return manifest
 
     def save_manifest(self, manifest: dict[str, Any]) -> None:
+        manifest = _require_dict(manifest, "manifest")
+        batch_id = _validate_batch_id(manifest.get("batch_id"))
+        with self._manifest_lock(batch_id):
+            self._save_manifest_unlocked(manifest)
+
+    def _save_manifest_unlocked(self, manifest: dict[str, Any]) -> None:
         manifest = _require_dict(manifest, "manifest")
         batch_id = _validate_batch_id(manifest.get("batch_id"))
         reports = manifest.get("reports", [])
@@ -186,17 +227,21 @@ class Bridge:
         _atomic_write_json(self._manifest_path(batch_id), manifest)
 
     def _upsert_manifest_entry(self, batch_id: str, entry: dict[str, Any], *, kind: str, destination: str) -> None:
-        manifest = self.load_manifest(batch_id)
-        reports = []
-        for r in manifest.get("reports", []):
-            if not isinstance(r, dict):
-                raise ValueError(f"manifest contains non-object report entry for batch {batch_id}")
-            if r.get("kind") == kind and r.get("destination") == destination:
-                continue
-            reports.append(r)
-        reports.append(entry)
-        manifest["reports"] = reports
-        self.save_manifest(manifest)
+        # The whole read-modify-write cycle must be under one lock. Splitting
+        # the lock around only save_manifest would still allow two writers to
+        # read the same snapshot and lose an update.
+        with self._manifest_lock(batch_id):
+            manifest = self.load_manifest(batch_id)
+            reports = []
+            for r in manifest.get("reports", []):
+                if not isinstance(r, dict):
+                    raise ValueError(f"manifest contains non-object report entry for batch {batch_id}")
+                if r.get("kind") == kind and r.get("destination") == destination:
+                    continue
+                reports.append(r)
+            reports.append(entry)
+            manifest["reports"] = reports
+            self._save_manifest_unlocked(manifest)
 
     def ingest_migration_report(self, report: dict[str, Any]) -> Path:
         report = _require_dict(report, "migration-report")
