@@ -81,6 +81,8 @@ def _atomic_write_json(path: Path, document: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
     finally:
         try:

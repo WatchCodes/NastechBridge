@@ -48,6 +48,26 @@ def _report(source: str, destination: str) -> dict:
     }
 
 
+def test_atomic_write_fsyncs_before_replace(tmp_path, monkeypatch):
+    events: list[str] = []
+    real_fsync = bridge_module.os.fsync
+    real_replace = bridge_module.os.replace
+
+    def tracked_fsync(fd):
+        events.append("fsync")
+        return real_fsync(fd)
+
+    def tracked_replace(src, dst):
+        events.append("replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(bridge_module.os, "fsync", tracked_fsync)
+    monkeypatch.setattr(bridge_module.os, "replace", tracked_replace)
+
+    bridge_module._atomic_write_json(tmp_path / "manifest.json", {"schema_version": 1})
+    assert events == ["fsync", "replace"]
+
+
 def test_manifest_lock_is_exclusive(tmp_path):
     bridge = Bridge(tmp_path / "bridge")
     with bridge._manifest_lock("b1"):
