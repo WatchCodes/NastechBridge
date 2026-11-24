@@ -86,6 +86,16 @@ def test_ingest_migration_report_writes_file_and_manifest(tmp_path):
             "source": "Owner/Repo",
             "destination": "WatchCodes/nastech-repo",
             "status": "VERIFIED",
+            "evidence": {
+                "created": True,
+                "named": True,
+                "owned": True,
+                "gated": True,
+                "license_kept": True,
+                "credits": True,
+                "source_sha": "a" * 40,
+                "destination_sha": "b" * 40,
+            },
         }
     ]
 

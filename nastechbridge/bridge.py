@@ -14,6 +14,12 @@ BATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 REPO_REF_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]{1,100}$")
 MIGRATION_TERMINAL = {"VERIFIED", "FAILED", "REQUIRES_REVIEW"}
 MIGRATION_FAILURE = {"FAILED", "REQUIRES_REVIEW"}
+# GATED is the rung above VERIFIED (the zero-brand gate passed). Both are positive
+# migration outcomes; READY is declared only by this component, never by CodeFoundry.
+MIGRATION_POSITIVE = {"VERIFIED", "GATED"}
+# A bare status string is a claim, not evidence. All six CodeFoundry checks must be
+# present and true before a repository may count toward readiness.
+REQUIRED_MIGRATION_CHECKS = ("created", "named", "owned", "gated", "license_kept", "credits")
 MANIFEST_KINDS = {"migration-report", "upstream-report"}
 
 
@@ -71,7 +77,15 @@ def _atomic_write_json(path: Path, document: dict[str, Any]) -> None:
             pass
 
 
-def _manifest_entry(kind: str, file: str, source: str, destination: str, status: Any) -> dict[str, Any]:
+def _manifest_entry(
+    kind: str,
+    file: str,
+    source: str,
+    destination: str,
+    status: Any,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "kind": kind,
         "file": file,
@@ -79,7 +93,30 @@ def _manifest_entry(kind: str, file: str, source: str, destination: str, status:
         "destination": destination,
         "status": status,
     }
+    if evidence is not None:
+        entry["evidence"] = evidence
     return entry
+
+
+def _migration_evidence(report: dict[str, Any]) -> dict[str, Any]:
+    """Extract the verifiable claims from a migration report into the manifest.
+
+    Missing or non-boolean checks are recorded as False so consolidation fails
+    closed rather than treating an absent field as a pass.
+    """
+    checks = report.get("checks")
+    checks = checks if isinstance(checks, dict) else {}
+    receipt = report.get("receipt")
+    receipt = receipt if isinstance(receipt, dict) else {}
+    evidence: dict[str, Any] = {name: checks.get(name) is True for name in REQUIRED_MIGRATION_CHECKS}
+    for key in ("source_sha", "destination_sha"):
+        value = receipt.get(key)
+        if isinstance(value, str) and value:
+            evidence[key] = value
+    license_info = report.get("license")
+    if isinstance(license_info, dict) and license_info.get("review_required") is True:
+        evidence["license_review_required"] = True
+    return evidence
 
 
 class Bridge:
@@ -186,6 +223,7 @@ class Bridge:
             source=source,
             destination=destination,
             status=status,
+            evidence=_migration_evidence(report),
         )
         self._upsert_manifest_entry(batch_id, entry, kind="migration-report", destination=destination)
         return out
@@ -258,12 +296,25 @@ class Bridge:
                 pending.append({"repo": src, "status": "QUEUED"})
                 continue
             status = match.get("status")
-            if status == "VERIFIED":
-                verified.append(src)
-            elif status in MIGRATION_FAILURE:
+            if status in MIGRATION_FAILURE:
                 failed.append({"repo": src, "reason": str(status)})
-            else:
+                continue
+            if status not in MIGRATION_POSITIVE:
                 pending.append({"repo": src, "status": str(status) if isinstance(status, str) and status else "QUEUED"})
+                continue
+
+            evidence = match.get("evidence")
+            if not isinstance(evidence, dict):
+                failed.append({"repo": src, "reason": "MISSING_EVIDENCE"})
+                continue
+            if evidence.get("license_review_required") is True:
+                failed.append({"repo": src, "reason": "LICENSE_REVIEW_REQUIRED"})
+                continue
+            missing = [name for name in REQUIRED_MIGRATION_CHECKS if evidence.get(name) is not True]
+            if missing:
+                failed.append({"repo": src, "reason": "EVIDENCE_INCOMPLETE:" + ",".join(missing)})
+                continue
+            verified.append(src)
 
         verified = sorted(set(verified))
         ready = (
