@@ -8,7 +8,7 @@ import re
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,10 @@ MIGRATION_POSITIVE = {"VERIFIED", "GATED"}
 # present and true before a repository may count toward readiness.
 REQUIRED_MIGRATION_CHECKS = ("created", "named", "owned", "gated", "license_kept", "credits")
 MANIFEST_KINDS = {"migration-report", "upstream-report"}
+# A non-terminal report left in the waitlist for a day is not merely pending:
+# it is a stuck batch that requires human review. Enforce this at read time so
+# old manifests cannot silently remain "pending" forever.
+STUCK_AFTER = timedelta(hours=24)
 
 
 def now_iso() -> str:
@@ -99,6 +103,7 @@ def _manifest_entry(
     status: Any,
     *,
     evidence: dict[str, Any] | None = None,
+    received_at: str | None = None,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "kind": kind,
@@ -106,10 +111,30 @@ def _manifest_entry(
         "source": source,
         "destination": destination,
         "status": status,
+        "received_at": received_at or now_iso(),
     }
     if evidence is not None:
         entry["evidence"] = evidence
     return entry
+
+
+def _is_stuck(entry: dict[str, Any], now: datetime) -> bool:
+    """Report a non-terminal entry as stuck only when its age is provable.
+
+    Missing or malformed timestamps are not evidence of age: leave them as
+    ordinary pending entries rather than inventing a deadline.
+    """
+    raw = entry.get("received_at")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        received = datetime.fromisoformat(raw)
+        if received.tzinfo is None:
+            # Naive timestamps are interpreted as UTC, matching now_iso().
+            received = datetime.fromisoformat(raw + "+00:00")
+    except ValueError:
+        return False
+    return now - received >= STUCK_AFTER
 
 
 def _migration_evidence(report: dict[str, Any]) -> dict[str, Any]:
@@ -235,12 +260,18 @@ class Bridge:
         with self._manifest_lock(batch_id):
             manifest = self.load_manifest(batch_id)
             reports = []
+            prior_received_at: str | None = None
             for r in manifest.get("reports", []):
                 if not isinstance(r, dict):
                     raise ValueError(f"manifest contains non-object report entry for batch {batch_id}")
                 if r.get("kind") == kind and r.get("destination") == destination:
+                    if isinstance(r.get("received_at"), str):
+                        prior_received_at = r["received_at"]
                     continue
                 reports.append(r)
+            # Re-ingest of the same idempotency key must not reset the stuck clock.
+            if prior_received_at is not None:
+                entry["received_at"] = prior_received_at
             reports.append(entry)
             manifest["reports"] = reports
             self._save_manifest_unlocked(manifest)
@@ -333,6 +364,8 @@ class Bridge:
         verified: list[str] = []
         failed: list[dict[str, str]] = []
         pending: list[dict[str, str]] = []
+        stuck: list[dict[str, str]] = []
+        now = datetime.now(timezone.utc)
 
         for src in expected_norm:
             if src in duplicate_sources:
@@ -347,7 +380,12 @@ class Bridge:
                 failed.append({"repo": src, "reason": str(status)})
                 continue
             if status not in MIGRATION_POSITIVE:
-                pending.append({"repo": src, "status": str(status) if isinstance(status, str) and status else "QUEUED"})
+                state = str(status) if isinstance(status, str) and status else "QUEUED"
+                if _is_stuck(match, now):
+                    stuck.append({"repo": src, "status": state})
+                    failed.append({"repo": src, "reason": f"STUCK_REQUIRES_REVIEW:{state}"})
+                else:
+                    pending.append({"repo": src, "status": state})
                 continue
 
             evidence = match.get("evidence")
@@ -373,9 +411,12 @@ class Bridge:
 
         blocking: list[str] = []
         for item in failed:
-            blocking.append(f"FAILED:{item['repo']}:{item['reason']}")
+            if not item["reason"].startswith("STUCK_"):
+                blocking.append(f"FAILED:{item['repo']}:{item['reason']}")
         for item in pending:
             blocking.append(f"PENDING:{item['repo']}:{item['status']}")
+        for item in stuck:
+            blocking.append(f"STUCK:{item['repo']}:{item['status']}")
         if len(expected_norm) == 0:
             blocking.append("EMPTY_EXPECTED")
 

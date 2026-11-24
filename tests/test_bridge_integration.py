@@ -79,25 +79,25 @@ def test_ingest_migration_report_writes_file_and_manifest(tmp_path):
     manifest = bridge.load_manifest("batch-1")
     assert manifest["batch_id"] == "batch-1"
     assert manifest["updated_at"] is not None
-    assert manifest["reports"] == [
-        {
-            "kind": "migration-report",
-            "file": "migration-report.WatchCodes__nastech-repo.json",
-            "source": "Owner/Repo",
-            "destination": "WatchCodes/nastech-repo",
-            "status": "VERIFIED",
-            "evidence": {
-                "created": True,
-                "named": True,
-                "owned": True,
-                "gated": True,
-                "license_kept": True,
-                "credits": True,
-                "source_sha": "a" * 40,
-                "destination_sha": "b" * 40,
-            },
-        }
-    ]
+    entry = manifest["reports"][0]
+    assert isinstance(entry.get("received_at"), str) and entry["received_at"].endswith("Z")
+    assert {k: v for k, v in entry.items() if k != "received_at"} == {
+        "kind": "migration-report",
+        "file": "migration-report.WatchCodes__nastech-repo.json",
+        "source": "Owner/Repo",
+        "destination": "WatchCodes/nastech-repo",
+        "status": "VERIFIED",
+        "evidence": {
+            "created": True,
+            "named": True,
+            "owned": True,
+            "gated": True,
+            "license_kept": True,
+            "credits": True,
+            "source_sha": "a" * 40,
+            "destination_sha": "b" * 40,
+        },
+    }
 
 
 def test_ingest_upstream_report_writes_file_and_manifest(tmp_path):
@@ -111,15 +111,15 @@ def test_ingest_upstream_report_writes_file_and_manifest(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8")) == report
 
     manifest = bridge.load_manifest("batch-1")
-    assert manifest["reports"] == [
-        {
-            "kind": "upstream-report",
-            "file": "upstream-report.WatchCodes__nastech-repo.json",
-            "source": "Owner/Repo",
-            "destination": "WatchCodes/nastech-repo",
-            "status": "active",
-        }
-    ]
+    entry = manifest["reports"][0]
+    assert isinstance(entry.get("received_at"), str) and entry["received_at"].endswith("Z")
+    assert {k: v for k, v in entry.items() if k != "received_at"} == {
+        "kind": "upstream-report",
+        "file": "upstream-report.WatchCodes__nastech-repo.json",
+        "source": "Owner/Repo",
+        "destination": "WatchCodes/nastech-repo",
+        "status": "active",
+    }
 
 
 def test_manifest_consolidates_mixed_reports_and_preserves_kinds(tmp_path):
