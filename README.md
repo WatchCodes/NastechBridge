@@ -86,6 +86,17 @@ plus `FAILED` and `REQUIRES_REVIEW`. `VERIFIED` means the repository exists with
 name and owner. `GATED` means the zero-brand gate passed. `READY` requires both. A created
 repository is never automatically ready.
 
+## CLI
+
+`nastechbridge` is installed as a console script. Every command prints one JSON object.
+
+- `validate --schema <name> --file <json>` — fail-closed contract check.
+- `ingest --root <dir> --kind migration-report|upstream-report --file <json> [--batch-id <id>]`
+  — append a report to the durable waitlist.
+- `consolidate --root <dir> --batch-id <id> --expected <owner/repo> [...]` — write
+  `batch-readiness-report.json`; exit code 0 only when the batch is ready.
+- `status --root <dir> --batch-id <id>` — show the manifest and stored readiness.
+
 ## Related repositories
 
 - `WatchCodes/RepoAtlas` — where `DISCOVERED` and `QUEUED` come from

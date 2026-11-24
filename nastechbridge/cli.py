@@ -7,8 +7,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from jsonschema import ValidationError
+
 from .bridge import Bridge
-from .contracts import UnknownSchemaError, is_valid, known_schemas, validate
+from .contracts import UnknownSchemaError, is_valid, known_schemas
 
 
 def _load_json(path: str) -> Any:
@@ -66,6 +68,20 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_consolidate(args: argparse.Namespace) -> int:
+    bridge = Bridge(args.root)
+    try:
+        report = bridge.consolidate(args.batch_id, args.expected)
+    except UnknownSchemaError as exc:
+        _emit({"ok": False, "error": str(exc), "known_schemas": known_schemas()})
+        return 2
+    except (TypeError, ValueError, ValidationError, OSError) as exc:
+        _emit({"ok": False, "error": str(exc)})
+        return 2
+    _emit({"ok": True, **report})
+    return 0 if report["ready"] else 1
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     bridge = Bridge(args.root)
     manifest = bridge.load_manifest(args.batch_id)
@@ -104,6 +120,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("--file", required=True, help="Path to report JSON")
     p_ingest.add_argument("--batch-id", help="Batch id (required for upstream-report)")
     p_ingest.set_defaults(func=cmd_ingest)
+
+    p_consolidate = sub.add_parser(
+        "consolidate", help="Consolidate ingested reports into a batch readiness gate"
+    )
+    p_consolidate.add_argument("--root", required=True, help="Bridge root directory")
+    p_consolidate.add_argument("--batch-id", required=True, help="Batch id")
+    p_consolidate.add_argument(
+        "--expected", nargs="+", required=True, help="Expected source repo refs (owner/repo)"
+    )
+    p_consolidate.set_defaults(func=cmd_consolidate)
 
     p_status = sub.add_parser("status", help="Show batch manifest and readiness status")
     p_status.add_argument("--root", required=True, help="Bridge root directory")

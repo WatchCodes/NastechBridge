@@ -162,3 +162,38 @@ def test_cli_ingest_upstream_report(tmp_path, capsys):
     assert rc == 0
     assert out["ok"] is True
     assert out["kind"] == "upstream-report"
+
+
+def test_cli_consolidate_ready(tmp_path, capsys):
+    root = tmp_path / "bridge"
+    report_path = tmp_path / "migration-report.json"
+    report_path.write_text(json.dumps(_migration_report()), encoding="utf-8")
+    assert main(["ingest", "--root", str(root), "--kind", "migration-report", "--file", str(report_path)]) == 0
+    capsys.readouterr()
+
+    rc = main(["consolidate", "--root", str(root), "--batch-id", "b1", "--expected", "Owner/Repo"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["ok"] is True
+    assert out["ready"] is True
+    assert out["verified"] == ["Owner/Repo"]
+    readiness = root / "reports" / "batches" / "b1" / "batch-readiness-report.json"
+    assert readiness.exists()
+    assert json.loads(readiness.read_text(encoding="utf-8"))["ready"] is True
+
+
+def test_cli_consolidate_not_ready_fails_closed(tmp_path, capsys):
+    root = tmp_path / "bridge"
+    rc = main(["consolidate", "--root", str(root), "--batch-id", "b1", "--expected", "Owner/Repo"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert out["ok"] is True
+    assert out["ready"] is False
+    assert "PENDING:Owner/Repo:QUEUED" in out["blocking"]
+
+
+def test_cli_consolidate_rejects_bad_expected(tmp_path, capsys):
+    rc = main(["consolidate", "--root", str(tmp_path / "bridge"), "--batch-id", "b1", "--expected", "../bad"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert out["ok"] is False

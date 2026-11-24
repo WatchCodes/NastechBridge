@@ -7,6 +7,9 @@ version = "0.1.0"
 description = "NastechBridge: durable report waitlist and batch readiness gate."
 requires-python = ">=3.11"
 dependencies = ["jsonschema>=4.21,<5"]
+[project.scripts]
+nastechbridge = "nastechbridge.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<9", "ruff>=0.9,<1"]
 [tool.setuptools]
